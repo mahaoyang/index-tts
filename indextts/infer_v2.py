@@ -62,9 +62,17 @@ class IndexTTS2:
             self.use_fp16 = False if device == "cpu" else use_fp16
             self.use_cuda_kernel = use_cuda_kernel is not None and use_cuda_kernel and device.startswith("cuda")
         elif torch.cuda.is_available():
-            self.device = "cuda:0"
-            self.use_fp16 = use_fp16
-            self.use_cuda_kernel = use_cuda_kernel is None or use_cuda_kernel
+            try:
+                torch.zeros(1, device="cuda")
+                self.device = "cuda:0"
+                self.use_fp16 = use_fp16
+                self.use_cuda_kernel = use_cuda_kernel is None or use_cuda_kernel
+            except Exception as e:
+                print(f">> CUDA is visible but unusable by this PyTorch build; falling back to CPU. Error: {e}")
+                self.device = "cpu"
+                self.use_fp16 = False
+                self.use_cuda_kernel = False
+                print(">> Be patient, it may take a while to run in CPU mode.")
         elif hasattr(torch, "xpu") and torch.xpu.is_available():
             self.device = "xpu"
             self.use_fp16 = use_fp16
@@ -86,7 +94,8 @@ class IndexTTS2:
         self.use_accel = use_accel
         self.use_torch_compile = use_torch_compile
 
-        self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path))
+        self.qwen_emo_path = os.path.join(self.model_dir, self.cfg.qwen_emo_path)
+        self.qwen_emo = None
 
         self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
@@ -221,6 +230,16 @@ class IndexTTS2:
         # 进度引用显示（可选）
         self.gr_progress = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
+
+    def _get_qwen_emo(self):
+        if self.qwen_emo is None:
+            if not os.path.isdir(self.qwen_emo_path):
+                raise FileNotFoundError(
+                    f"Qwen emotion model not found: {self.qwen_emo_path}. "
+                    "It is only required when using text emotion control."
+                )
+            self.qwen_emo = QwenEmotion(self.qwen_emo_path)
+        return self.qwen_emo
 
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):
@@ -410,7 +429,7 @@ class IndexTTS2:
             # automatically generate emotion vectors from text prompt
             if emo_text is None:
                 emo_text = text  # use main text prompt
-            emo_dict = self.qwen_emo.inference(emo_text)
+            emo_dict = self._get_qwen_emo().inference(emo_text)
             print(f"detected emotion vectors from text: {emo_dict}")
             # convert ordered dict to list of vectors; the order is VERY important!
             emo_vector = list(emo_dict.values())
